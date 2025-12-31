@@ -27,11 +27,15 @@
 	],
 	"editor.scrollbar.verticalScrollbarSize": 8,
 	"editor.tabSize": 2,
+	"explorer.autoReveal": false,
 	"javascript.preferences.importModuleSpecifier": "project-relative",
 	"javascript.preferences.useAliasesForRenames": false,
 	"javascript.updateImportsOnFileMove.enabled": "always",
 	"terminal.integrated.cursorStyle": "line",
 	"terminal.integrated.cursorStyleInactive": "line",
+	"terminal.integrated.fontFamily": "JetBrains Mono NL",
+	"terminal.integrated.letterSpacing": 0,
+	"terminal.integrated.lineHeight": 1,
 	"typescript.preferences.importModuleSpecifier": "project-relative",
 	"typescript.preferences.useAliasesForRenames": false,
 	"typescript.tsserver.maxTsServerMemory": 8192,
@@ -41,6 +45,10 @@
 	"vscode_custom_css.statusbar": false,
 	"window.autoDetectColorScheme": true,
 	"workbench.activityBar.location": "top",
+	"workbench.editor.customLabels.enabled": true,
+	"workbench.editor.customLabels.patterns": {
+		"**/index.ts": "${dirname}"
+	},
 	"workbench.fontAliasing": "default",
 	"workbench.iconTheme": "jetbrains-file-icon-theme-auto",
 	"workbench.list.openMode": "doubleClick",
@@ -48,6 +56,6 @@
 	"workbench.preferredLightColorTheme": "GitHub Light Default",
 	"workbench.productIconTheme": "jetbrans",
 	"workbench.tree.expandMode": "doubleClick",
-	"workbench.tree.indent": 16,
+	"workbench.tree.indent": 18,
 	"workbench.tree.renderIndentGuides": "none"
 }
