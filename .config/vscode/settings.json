@@ -3,13 +3,12 @@
 	"editor.accessibilitySupport": "off",
 	"editor.colorDecoratorsActivatedOn": "click",
 	"editor.cursorBlinking": "solid",
-	"editor.cursorHeight": 20,
 	"editor.cursorStyle": "line",
 	"editor.fontFamily": "JetBrains Mono",
 	"editor.fontLigatures": "'calt', 'liga', 'ss01', 'ss19', 'cv18', 'zero'",
 	"editor.fontSize": 12,
 	"editor.fontVariations": "'wght' 500",
-	"editor.fontWeight": 400,
+	"editor.fontWeight": 500,
 	"editor.guides.bracketPairs": "active",
 	"editor.guides.highlightActiveBracketPair": true,
 	"editor.guides.highlightActiveIndentation": false,
@@ -21,13 +20,14 @@
 	"editor.renderLineHighlight": "all",
 	"editor.rulers": [
 		{
-			"color": "#333",
-			"column": 120
+			"color": "#9993",
+			"column": 140
 		}
 	],
 	"editor.scrollbar.verticalScrollbarSize": 8,
 	"editor.tabSize": 2,
 	"explorer.autoReveal": false,
+	"markdown.preview.typographer": true,
 	"javascript.preferences.importModuleSpecifier": "project-relative",
 	"javascript.preferences.useAliasesForRenames": false,
 	"javascript.updateImportsOnFileMove.enabled": "always",
