@@ -10,8 +10,12 @@ test -e "${HOME}/.iterm2_shell_integration.zsh" && source "${HOME}/.iterm2_shell
 export ANDROID_HOME=$HOME/Library/Android/sdk
 export PATH=$PATH:$ANDROID_HOME/emulator
 export PATH=$PATH:$ANDROID_HOME/platform-tools
-export JAVA_HOME=$HOME/Library/Java/JavaVirtualMachines/azul-17.0.13/Contents/Home
-export BIOME_CONFIG_PATH=~/.config/biome.json
+export PATH=$PATH:$(brew --prefix rustup)/bin
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/amazon-corretto-21.jdk/Contents/Home
+
+export LDFLAGS="-L/opt/homebrew/opt/zlib/lib"
+export CPPFLAGS="-I/opt/homebrew/opt/zlib/include"
+export PKG_CONFIG_PATH="/opt/homebrew/opt/zlib/lib/pkgconfig"
 
 # zsh-syntax-highlighting
 typeset -A ZSH_HIGHLIGHT_STYLES
