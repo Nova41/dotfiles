@@ -1,0 +1,7 @@
+[
+  {
+    "bindings": {
+      "F1": "command_palette::Toggle"
+    }
+  }
+]
