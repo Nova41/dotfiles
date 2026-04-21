@@ -1,258 +1,212 @@
 """
-Provides a full-width tab bar, with evenly-sized tabs that don't vary based on
-their content.
+Provides a full-width tab bar with fixed-sized tabs to the left and a status bar to
+the right. The layout is visualized as follows:
 
-The tabs' title is split into a status zone aligned to the left, and the title
-zone which gets centered if space permits.
+[LOGO][(TAB 1)(TAB 2) ...]                                    [BATTERY] [TIME] [DATE]
 
 COMPATIBILITY
 
-This plugins requires python >= 3.12, as it relies on some improvements to
-f-strings handling that were introduced with PEP 701, notably quote reuse in
-nested f-strings.
+This plugin only supports MacOS.
 
-CONFIGURATION
+OPTIONS
 
-tab_bar_style       custom
-tab_separator       simple|dashed|angled|slanted|rounded|"<1-char>"|"<2n-chars>"
-tab_title_template  "<d><status><d><separator><d><title>"
-
-Where:
-    <1-char>        is a character displayed on a single column.
-    <2n-char>       is a string displayed on an even number of columns and that
-                    can be split in half, with the first half being used for the
-                    "hard" tab separator (on the active tab), and the second
-                    half for the "soft" tab separator (between background tabs).
-    <d>             is a delimiter that does not appear in the status, separator
-                    or title templates.
-    <status>        is a template used for the status zone.
-    <separator>     is a template displayed after the status if the status zone
-                    is not empty.
-    <title>         is a template used for the tab's title.
+USE_REPAINT_TIMER   If enabled, the tab bar is force-repainted every second.
+                    By default, the status bar only gets updated passively when kitty
+                    repaints and can never exceed the configured `repaint_delay`
+                    (default is 2s).
+                    Note: Repaint will still subject to OS's repaint scheduling, i.e.
+                    OS might suspend kitty's repainting when the app is running in
+                    background or has no foreground activity.
 """
 
-from functools import lru_cache
 
-from kitty.fast_data_types import Screen, get_boss, get_options, wcswidth
-from kitty.tab_bar import DrawData, ExtraData, TabBarData, as_rgb
-from kitty.tab_bar import draw_title as kitty_draw_title
-from kitty.tab_bar import safe_builtins
+# pyright: reportMissingImports=false
+from datetime import datetime
+from subprocess import CalledProcessError, check_output
+from time import time
+
+from kitty.fast_data_types import add_timer, get_boss, get_options, remove_timer, Screen
+from kitty.tab_bar import (
+    DrawData,
+    ExtraData,
+    Formatter,
+    TabBarData,
+    as_rgb,
+    draw_attributed_string,
+    draw_title,
+)
+from kitty.utils import color_as_int
 
 
-# Patch Kitty's tab_bar script to allow extra functions in the title template.
-# As Kitty's draw_title function is used to render the title templates, it's
-# easier to inject some helper functions in the title template than attempt to
-# predict what will be rendered to correct for it, track what's been rendered to
-# fix afterwards, or to pre-render the templates ourselves.
-safe_builtins['dlen'] = lru_cache(wcswidth)     # display length
+# ------------------ Config ------------------
+USE_REPAINT_TIMER = False
+USE_DEBUG_LOGGING = False
+# ------------------ Config ------------------
 
 
-separator_symbols: dict[str, tuple[str, str]] = {
-    'simple':   ('▌', '│'),
-    'dashed':   ('▌', '┊'),
-    'angled':   ('', ''),
-    'slanted':  ('', '╱'),
-    'rounded':  ('', ''),
+opts = get_options()
+ICON_FG = as_rgb(color_as_int(opts.color16))
+ICON_BG = as_rgb(color_as_int(opts.color8))
+BATTERY_TEXT_FG = as_rgb(color_as_int(opts.foreground))
+DATE_FG = as_rgb(color_as_int(opts.color8))
+TIME_FG = as_rgb(color_as_int(opts.foreground))
+SEPARATOR_SYMBOL, SOFT_SEPARATOR_SYMBOL = ("", "")
+RIGHT_MARGIN = 1
+REFRESH_TIME = 1
+BRAND_ICON = " 󰸏  "
+UNPLUGGED_ICONS = {
+    10: "󰁺",
+    20: "󰁻",
+    30: "󰁼",
+    40: "󰁽",
+    50: "󰁾",
+    60: "󰁿",
+    70: "󰂀",
+    80: "󰂁",
+    90: "󰂂",
+    100: "󰁹",
+}
+PLUGGED_ICONS = {
+    10: "󰢜",
+    20: "󰂆",
+    30: "󰂇",
+    40: "󰂈",
+    50: "󰢝",
+    60: "󰂉",
+    70: "󰢞",
+    80: "󰂊",
+    90: "󰂋",
+    99: "󰂅",
+    100: "󰂄",
+}
+UNKNOWN_ICON = "󰂑"
+UNPLUGGED_COLORS = {
+    15: as_rgb(color_as_int(opts.color1)),
+    16: as_rgb(color_as_int(opts.color11)),
+    30: as_rgb(color_as_int(opts.color15)),
+}
+PLUGGED_COLORS = {
+    15: as_rgb(color_as_int(opts.color1)),
+    16: as_rgb(color_as_int(opts.color11)),
+    30: as_rgb(color_as_int(opts.color6)),
+    99: as_rgb(color_as_int(opts.color6)),
+    100: as_rgb(color_as_int(opts.color2)),
 }
 
-def title_length(
-    screen: Screen,
-    index: int, # 1-based
-    sep_width: int,
-) -> int:
-    """
-    Computes the title length for the current tab, such taht all tabs have about
-    the same title size, ensuring that the tab bar is filled exactly.
-    This assumes no separator before the first tab and after the last, and all
-    separators having the same size.
-    """
+timer_id = None
+len_info_cells = -1
+cached_battery_cells = {}
+cached_battery_cells_updated_at = 0
 
-    ntabs = len(get_boss().active_tab_manager.tabs)
-    ncols = screen.columns - (ntabs - 1) * sep_width
 
-    width = ncols // ntabs
-    # Compensate missing width m by adding 1 to first m tabs. There is always at
-    # least m tabs (pigeonhole principle).
-    width += 1 if (index <= ncols % ntabs) else 0
-    return width
+def _log(message, *args):
+    if USE_DEBUG_LOGGING == False:
+        return
+    print(message, *args)
 
-@lru_cache
-def wsplit(s: str, n: int) -> tuple[str, str]:
+
+def get_battery_stats() -> dict[str, str] | None:
     """
-    Greedily splits a string at column `n`, taking into account wide characters
-    and graphene clusters.
+    Read MacOS battery stats with ioreg.
     """
 
-    if n < 0:
-        return ('', s)
+    battery_keys = ('IsCharging', 'ExternalConnected', 'CurrentCapacity', 'MaxCapacity')
+    battery_data = {}
+    try:
+        out = check_output(['ioreg', '-rc', 'AppleSmartBattery'], text=True)
 
-    for i in range(len(s) + 1):
-        l = wcswidth(s[:i])
-        if l < n:
-            continue
-        elif l > n:
-            c = wsplit(s[i-1:], 2)[0]
-            raise Exception(f"Column {n} in '{s}' splits the wide character {c}.")
+        for line in out.splitlines():
+            for key in battery_keys:
+                if f'"{key}"' in line:
+                    battery_data[key] = line.split('=')[-1].strip()
+                    if len(battery_data) == len(battery_keys):
+                        return battery_data
 
-        for i in range(i, len(s)):
-            l = wcswidth(s[:i+1])
-            if l > n:
-                return (s[:i], s[i:])
-        break
-    return (s, '')
-
-def cfg_separator(
-    draw_data: DrawData,
-    screen: Screen,
-    extra_data: ExtraData
-) -> tuple[str, bool]:
-    sep_cfg = get_options().tab_separator
-    sep_hard, sep_soft = separator_symbols.get(sep_cfg) or (
-        ('▌', sep_cfg) if (l := wcswidth(sep_cfg)) == 1
-        else wsplit(sep_cfg, l // 2) if l % 2 == 0
-        else separator_symbols.get('simple')
-    )
-
-    # Checking using colors instead of tab.is_active, because users could choose
-    # to highlight active tab in other ways, and the soft/hard distinction for
-    # separators is only a colors thing.
-    tab_bg = screen.cursor.bg
-    next_tab_bg = as_rgb(draw_data.tab_bg(extra_data.next_tab)) if extra_data.next_tab else None
-    sep = sep_hard if next_tab_bg and next_tab_bg != tab_bg else sep_soft
-
-    return (sep is sep_hard, sep, wcswidth(sep), next_tab_bg)
-
-def draw_title(
-    draw_data: DrawData,
-    screen: Screen,
-    tab: TabBarData,
-    index: int,
-    title_length: int = 0
-) -> None:
-    """
-    Wrapper for Kitty's `draw_title` function that aligns the status zone and
-    the title correctly, making sure to preserve the expected tab size.
-    """
-
-    @lru_cache
-    def make_title(tpl: str) -> str:
-        if tpl is None:
-            return None
-
-        (_, status, sep, title, *_) = tpl.split(tpl[0], 5)
-
-        # Those variables contain a template, so we can only embed them in the
-        # final template to get evaluated when the tab is rendered. In
-        # particular, their length can't be computd before ahead of time (that
-        # is, without evaluating the template ourselves).
-        # To protect the template against whatever f-string embedding Kitty is
-        # doing, and in particular to allow quote reuse, the variables should
-        # always be embedded in an expression component in the final template.
-        status = 'f"""' + status + '"""'
-        sep = 'f"""' + sep + '"""'
-        title = 'f"""' + title + '"""'
-
-        status = f'{{(_s := (_s := {status}) + ({sep} if _s else ""))}}'
-
-        # Apply corrections if the title contains wide characters.
-        max_length = 'max_title_length - (dlen(_t) - len(_t))'
-
-        # Status length is removed from left and right of title to avoid status
-        # items causing the title to shift (if there is enough space).
-        # It should then be compensated on the right to avoid the tab itself
-        # changing size, but this can easily be done after the title has been
-        # drawn, without having to compute the rendered size of the status or
-        # title.
-        title = f'{{(_t := {title}).center(({max_length}) - dlen(_s) * 2)}}'
-
-        # Disable Kitty's backward compatibility mode "automatically prepend
-        # {bell_symbol} and {activity_symbol} if not present".
-        #
-        # This is necessary because otherwise it breaks the tab bar when a tab
-        # wants to show a missing symbol.
-        #
-        # This is caused by Kitty using `string.Formatter.parse` to check if
-        # they are missing, which parses the `string.format` mini-language, not
-        # the f-string templates that support arbitrary python expressions and
-        # in particular nested f-strings. The format mini-language parser borks
-        # on nested f-strings as soon as a nested interpolation is encountered.
-        # For rendering the template, Kitty evaluates f-strings and does not
-        # rely on `string.format`, so nested f-strings are otherwise not an
-        # issue.
-        #
-        # Adding a noop using those variables at the beginning of the template
-        # solves the issue because Kitty lazily parses the template until the
-        # variables are found, and if they appear early the routine won't reach
-        # nested f-strings where the parser borks.
-        nocompat = '{"" and bell_symbol and activity_symbol}'
-
-        return nocompat + status + title
-
-    draw_data = draw_data._replace(
-        title_template = make_title(draw_data.title_template),
-        active_title_template = make_title(draw_data.active_title_template),
-    )
-
-    before = screen.cursor.x
-    kitty_draw_title(draw_data, screen, tab, index, title_length)
-    extra = screen.cursor.x - before - title_length
-    if extra < 0:
-        screen.draw(' ' * -extra)
-    elif extra > 0 and extra + 1 < screen.cursor.x:
-        screen.cursor.x -= extra + 1
-        screen.draw('…')
+    except (FileNotFoundError, CalledProcessError, KeyError, ValueError):
+        return None
 
 
-def draw_tab(
+def get_battery_cells(battery_data: dict[str, str]) -> list[tuple[int, str]]:
+    _log("get_battery_cells(): Received", battery_data)
+    cur_cap = int(battery_data.get('CurrentCapacity', 0))
+    max_cap = int(battery_data.get('MaxCapacity', 100))
+    percent = round(cur_cap * 100 / max_cap) if max_cap else 0
+
+    is_charging = battery_data.get('IsCharging') == 'Yes'
+    is_plugged = battery_data.get('ExternalConnected') == 'Yes'
+
+    # discharging
+    if not is_plugged and not is_charging:
+        # TODO: declare the lambda once and don't repeat the code
+        icon_color = UNPLUGGED_COLORS[
+            min(UNPLUGGED_COLORS.keys(), key=lambda x: abs(x - percent))
+        ]
+        icon = UNPLUGGED_ICONS[
+            min(UNPLUGGED_ICONS.keys(), key=lambda x: abs(x - percent))
+        ]
+    # plugged in and full
+    elif is_plugged and not is_charging:
+        icon_color = UNPLUGGED_COLORS[
+            min(UNPLUGGED_COLORS.keys(), key=lambda x: abs(x - percent))
+        ]
+        icon = PLUGGED_ICONS[
+            min(PLUGGED_ICONS.keys(), key=lambda x: abs(x - percent))
+        ]
+    # plugged in and charging
+    else:
+        icon_color = PLUGGED_COLORS[
+            min(PLUGGED_COLORS.keys(), key=lambda x: abs(x - percent))
+        ]
+        icon = PLUGGED_ICONS[
+            min(PLUGGED_ICONS.keys(), key=lambda x: abs(x - percent))
+        ]
+    percent_cell = (BATTERY_TEXT_FG, str(percent) + "% ")
+    icon_cell = (icon_color, icon)
+    return [percent_cell, icon_cell]
+
+
+def _draw_icon(screen: Screen, index: int) -> int:
+    if index != 1:
+        return 0
+    fg, bg = screen.cursor.fg, screen.cursor.bg
+    screen.cursor.fg = ICON_FG
+    screen.cursor.bg = ICON_BG
+    screen.draw(BRAND_ICON)
+    screen.cursor.fg, screen.cursor.bg = fg, bg
+    screen.cursor.x = len(BRAND_ICON)
+    return screen.cursor.x
+
+
+def _draw_tabs(
     draw_data: DrawData,
     screen: Screen,
     tab: TabBarData,
     before: int,
-    max_tab_length: int,
+    max_title_length: int,
     index: int,
     is_last: bool,
-    extra_data: ExtraData
+    extra_data: ExtraData,
 ) -> int:
-    """
-    Draw the tab bar as a fullwidth bar with tabs of equals size.
-    Inspired by Kitty's `draw_tab_with_powerline`.
-    """
-
-    (sep_is_hard, sep, sep_width, next_tab_bg) = cfg_separator(
-        draw_data, screen, extra_data)
-
-    # Override kitty's tab length algorithm. We treat this as fixed length.
-    max_title_length = title_length(screen, index, sep_width)
-    max_tab_length = max_title_length + (sep_width if not is_last else 0)
-
-    # Early exit for layout-only call
-    if extra_data.for_layout:
-        screen.cursor.x += max_tab_length
+    if screen.cursor.x >= screen.columns - len_info_cells:
         return screen.cursor.x
 
     tab_bg = screen.cursor.bg
     tab_fg = screen.cursor.fg
     default_bg = as_rgb(int(draw_data.default_bg))
-
-    if max_title_length <= 3:
-        screen.draw(' … ')
+    if extra_data.next_tab:
+        next_tab_bg = as_rgb(draw_data.tab_bg(extra_data.next_tab))
+        needs_soft_separator = next_tab_bg == tab_bg
     else:
-        screen.draw(' ')
-        draw_title(draw_data, screen, tab, index, max_title_length - 2)
-        screen.draw(' ')
+        next_tab_bg = default_bg
+        needs_soft_separator = False
 
-    if is_last:
-        # Should not happen as we compute tab width such that the tab bar gets
-        # completely filled, but if anything weird happens we cover past the
-        # last tab so that the bar's background doesn't show (esp. annoying if
-        # the last tab is active).
-        if (e := screen.columns - screen.cursor.x) > 0:
-            screen.draw(' ' * e)
-    elif sep_is_hard:
-        screen.cursor.fg = tab_bg
-        screen.cursor.bg = next_tab_bg
-        screen.draw(sep)
-    else:
+    screen.cursor.x
+    screen.draw(" ")
+    screen.cursor.bg = tab_bg
+
+    draw_title(draw_data, screen, tab, index)
+
+    if needs_soft_separator:
         prev_fg = screen.cursor.fg
         if tab_bg == tab_fg:
             screen.cursor.fg = default_bg
@@ -261,7 +215,91 @@ def draw_tab(
             c2 = draw_data.inactive_bg.contrast(draw_data.inactive_fg)
             if c1 < c2:
                 screen.cursor.fg = default_bg
-        screen.draw(sep)
-        screen.cursor.fg = prev_fg
+        screen.draw(" " + SOFT_SEPARATOR_SYMBOL)
+        screen.cursor.fg = prev_fg 
+    else:
+        screen.draw(" ")
+        screen.cursor.fg = tab_bg
+        screen.cursor.bg = next_tab_bg
+        screen.draw(SEPARATOR_SYMBOL)
+
+    return screen.cursor.x
+
+
+def _draw_info(screen: Screen, is_last: bool, cells: list[tuple[int, str]]) -> int:
+    if not is_last:
+        return 0
+
+    draw_attributed_string(Formatter.reset, screen)
+    screen.cursor.x = screen.columns - len_info_cells
+    screen.cursor.fg = 0
+
+    for (color, status) in cells:
+        screen.cursor.fg = color
+        screen.draw(status)
+    screen.cursor.bg = 0
+
+    return screen.cursor.x
+
+
+def _redraw_tab_bar(_):
+    _log("_redraw_tab_bar(): Calling refresh_active_tab_bar()")
+    print(get_boss().active_tab_manager)
+    get_boss().refresh_active_tab_bar()
+
+
+def draw_tab(
+    draw_data: DrawData,
+    screen: Screen,
+    tab: TabBarData,
+    before: int,
+    max_title_length: int,
+    index: int,
+    is_last: bool,
+    extra_data: ExtraData,
+) -> int:
+    global timer_id
+    global len_info_cells
+    global cached_battery_cells
+    global cached_battery_cells_updated_at
+
+    if timer_id is None and USE_REPAINT_TIMER is True:
+        _log("draw_tab(): Registering repaint timer with interval", REFRESH_TIME)
+        timer_id = add_timer(_redraw_tab_bar, REFRESH_TIME, True)
+
+    cells = []
+
+    # Throttle battery cell updates to every 2s
+    if time() - cached_battery_cells_updated_at > 2:
+        battery_stats = get_battery_stats()
+        if battery_stats is not None:
+            cached_battery_cells = get_battery_cells(battery_stats)
+            cached_battery_cells_updated_at = time()
+
+    if cached_battery_cells is not None:
+        cells.extend(cached_battery_cells)
+
+    time_str = datetime.now().strftime(" %H:%M")
+    cells.append((TIME_FG, time_str))
+
+    date_str = datetime.now().strftime(" %m/%d/%Y")
+    cells.append((DATE_FG, date_str))
+
+    len_info_cells = RIGHT_MARGIN
+    for cell in cells:
+        len_info_cells += len(str(cell[1]))
+
+    _draw_icon(screen, index)
+    _draw_tabs(
+        draw_data,
+        screen,
+        tab,
+        before,
+        max_title_length,
+        index,
+        is_last,
+        extra_data,
+    )
+    _draw_info(screen, is_last, cells)
 
     return screen.cursor.x
